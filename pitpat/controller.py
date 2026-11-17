@@ -9,10 +9,12 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable, Optional, Union
 
 from . import protocol
 from .config import Config
+from .history import FLOORS_PER_MILE_PER_PERCENT, METRES_PER_MILE, MIN_METRES, History, Workout, distance, distance_unit
 from .plans import Plan, PlanRun, Point, RunView, load_plans, validate
 from .protocol import KM_PER_MILE, State, Status
 
@@ -81,6 +83,9 @@ class View:
     rest_seconds: float = 900.0  # How long a rest must be
     run_seconds: float = 0.0  # Belt-running time since the last full rest
     rest_left: Optional[float] = None  # Seconds of rest still needed, once the limit is reached
+    floors: float = 0.0  # Climbed so far in this workout
+    workouts: tuple[Workout, ...] = ()  # Saved workouts, oldest first
+    imperial: bool = True  # Whether to show the history in miles
 
 
 def detail_rows(view: View) -> list[tuple[str, str]]:
@@ -144,6 +149,11 @@ class Controller:
         self.run_seconds = 0.0
         self.still_seconds = 0.0
         self.last_tick: Optional[float] = None
+        # The workout in progress, added up from status readings, and the saved ones.
+        self.wall: Callable[[], datetime] = datetime.now
+        self.history = History.load()
+        self.workouts: tuple[Workout, ...] = tuple(self.history.workouts)
+        self._reset_workout()
         self.resume_speed: Optional[float] = None
         self.unconfirmed_steps: Optional[int] = None
         self.conn_state = IDLE
@@ -192,6 +202,9 @@ class Controller:
             rest_seconds=self._rest_needed(),
             run_seconds=self.run_seconds,
             rest_left=self._rest_left(),
+            floors=self.wk_floors,
+            workouts=self.workouts,
+            imperial=self.config.imperial,
         )
 
     def notify(self, message: str, severity: str = "information", title: str = "") -> None:
@@ -268,6 +281,7 @@ class Controller:
         self.goal = None
         self._clear_incline_goal()
         self._reset_presence()
+        self._finish_workout()
         self.last_tick = None  # The time we were out of touch counts as neither running nor rest
         if self.run:  # The treadmill's counters can't be trusted across a reconnect
             self.run = None
@@ -293,6 +307,7 @@ class Controller:
                 await asyncio.wait_for(self.treadmill.send(protocol.pause(self.status.imperial)), 3)
             except Exception as e:
                 log.warning("Couldn't pause before quitting: %s", e)
+        self._finish_workout()  # Quitting mid-workout still saves what was done
         await self._drop_treadmill()
         self.conn_state = IDLE
         self._changed()
@@ -310,6 +325,7 @@ class Controller:
         self.status = status
         if status.state == State.RUNNING and status.target_speed:
             self.resume_speed = status.to_display(status.target_speed)
+        self._track_workout(status)
         self._advance_plan(status)
         self._watch_presence(status)
         self._watch_rest(status)
@@ -452,6 +468,60 @@ class Controller:
     def set_off_belt_seconds(self, seconds: float) -> None:
         self.config.off_belt_seconds = min(max(float(seconds), MIN_OFF_BELT_SECONDS), MAX_OFF_BELT_SECONDS)
         self.config.save()
+        self._changed()
+
+    # --- Workouts --------------------------------------------------------------------
+    # A workout runs from when the belt first moves until the treadmill is stopped. It
+    # is added up from the changes in the treadmill's own distance and time counters,
+    # plus the floors climbed: distance travelled times the incline, as a grade.
+
+    def _reset_workout(self) -> None:
+        self.wk_last: Optional[tuple[float, float]] = None  # The counters at the last reading
+        self.wk_metres = self.wk_seconds = self.wk_floors = 0.0
+        self.wk_started: Optional[datetime] = None
+        self.wk_plan: Optional[str] = None
+
+    def _track_workout(self, s: Status) -> None:
+        if s.imperial != self.config.imperial:
+            self.config.imperial = s.imperial
+            self.config.save()
+        here = (float(s.distance_m), float(s.duration_s))
+        last = self.wk_last
+        if last is not None and (here[0] < last[0] or here[1] < last[1]):
+            self._finish_workout()  # The treadmill began a new session without our seeing it stop
+            last = None
+        if s.state == State.STOPPED:
+            self._finish_workout()
+            return
+        if last is None:  # Joining a session already under way counts what it has done so far
+            self.wk_metres, self.wk_seconds = here
+            self.wk_started = self.wall()
+        else:
+            delta = here[0] - last[0]
+            self.wk_metres += delta
+            self.wk_seconds += here[1] - last[1]
+            if s.state == State.RUNNING:
+                self.wk_floors += delta / METRES_PER_MILE * s.incline * FLOORS_PER_MILE_PER_PERCENT
+        self.wk_last = here
+
+    def _finish_workout(self) -> None:
+        """Saves the workout in progress to the history, if it went anywhere, and starts afresh."""
+        metres, seconds, floors, started, plan = (
+            self.wk_metres, self.wk_seconds, self.wk_floors, self.wk_started, self.wk_plan)
+        self._reset_workout()
+        if started is None or metres < MIN_METRES:
+            return
+        workout = Workout(started.date().isoformat(), started.isoformat(timespec="seconds"),
+                          round(metres, 1), round(floors, 2), round(seconds), plan)  # As they will read back
+        try:
+            self.history.add(workout)
+        except OSError as e:
+            log.warning("Couldn't save the workout: %s", e)
+            self.notify(f"Couldn't save this workout: {e}", "error", "History")
+        self.workouts = tuple(self.history.workouts)
+        imperial = self.config.imperial
+        self.notify(f"{distance(metres, imperial):.2f} {distance_unit(imperial)} and {floors:.1f} floors "
+                    "added to today.", title="Workout saved")
         self._changed()
 
     # --- Resting -------------------------------------------------------------------
@@ -698,6 +768,7 @@ class Controller:
         if self._start_blocked():
             return
         self.run = PlanRun(plan, s.distance_m, s.duration_s)
+        self.wk_plan = plan.name
         self._enter_point(self.run.point, first=True)
         self._changed()
 

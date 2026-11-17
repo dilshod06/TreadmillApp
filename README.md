@@ -53,13 +53,14 @@ From a clone: `uv tool install -e ".[gui]"`.
   right-click for start/pause, speed ±0.1, presets, stop and quit.
 - **Closing the window** keeps it running in the tray. Quit from the tray menu,
   which pauses the belt first if it's moving.
-- **Start with Windows** (tray menu) launches it in the tray at login. It
+- **Start with Windows** (on the Settings page) launches it in the tray at login. It
   retries quietly until your treadmill is on.
 - Only one copy runs at a time; launching it again brings up the open window.
 
 ### Modes: Normal and Countdown
 
-The window has three tabs under the connection line: the two modes, and **Settings** (below).
+The window has three tabs under the connection line (Normal, Countdown and **History**, below),
+and a gear at the right for **Settings**.
 The tabs only change what you see: a plan keeps running when you look at another one, the
 Countdown tab shows its progress ("Countdown · 40%"), and Normal shows a bar you can click
 to get back to it.
@@ -131,9 +132,26 @@ told it needs to cool down, and the app won't start it again until it has rested
 - The running time is counted by the app while it is open, so quitting it forgets the
   count. Untick the setting to turn the limit off.
 
-### Settings tab
+### Floors and workout history
 
-Incline, stepping off and rest are all set here. The tray menu has **Settings…** to open it.
+**Floors climbed** shows live next to the distance, and on the plan screen. It is the
+distance you've covered times the incline, as a grade, at 10 ft a floor. The treadmill
+doesn't report floors, and the app takes incline level N to be an N % grade, so treat the
+number as an estimate.
+
+Every workout is saved to the **History** tab, by day. A workout runs from when the belt
+first moves until the treadmill stops, whether you pressed Stop, a plan finished, or you
+used the remote. Pausing doesn't end it, and quitting or losing the connection saves
+what was done so far. Under about 0.01 mile isn't saved. Pick **This week**, **Last
+week**, **Last 4 weeks** or **Pick dates** to see distance, floors, workouts and time, a
+chart per day (per week for long ranges), a week-by-week table and the daily records.
+**Generate summary** makes a short text with the totals for those dates to copy. Weeks
+run Monday to Sunday, and distance is in the treadmill's own units.
+
+### Settings page
+
+Incline, stepping off, rest, starting with Windows and choosing a treadmill are all here,
+and the treadmill's details under **Details**. The tray menu has **Settings…** to open it.
 
 It shares its saved treadmill and presets with the terminal app, but run only one
 of them at a time, since a treadmill accepts a single Bluetooth connection.
@@ -170,8 +188,9 @@ capped at its maximum. Presets above the maximum are dimmed.
 
 ### Settings and logs
 
-The last treadmill and your presets are kept in `config.json`, and logs in
-`pitpat.log`, both in:
+The last treadmill, your presets, plans and settings are kept in `config.json`, your workouts in
+`history.json` (one entry per workout, written safely so a crash can't corrupt it; copy it to back
+it up), and logs in `pitpat.log`, all in:
 
 - Linux: `~/.config/pitpat/`
 - Windows: `%APPDATA%\pitpat\`

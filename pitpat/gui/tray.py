@@ -9,7 +9,6 @@ from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 from ..controller import STATE_LABELS, View, fmt_duration
 from ..plans import fmt_amount
 from ..protocol import State
-from . import autostart
 from .backend import Backend
 from .icons import make_icon, make_view_icon
 
@@ -96,10 +95,6 @@ class Tray(QObject):
         self.choose.triggered.connect(self.choose_requested)
         self.settings = menu.addAction("Settings…")
         self.settings.triggered.connect(self.settings_requested)
-        self.autostart = menu.addAction("Start with Windows")
-        self.autostart.setCheckable(True)
-        self.autostart.setChecked(self._autostart_enabled())
-        self.autostart.toggled.connect(self._set_autostart)
         menu.addSeparator()
         self.quit = menu.addAction("Quit")
         self.quit.triggered.connect(self.quit_requested)
@@ -124,24 +119,6 @@ class Tray(QObject):
     def _activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
             self.show_requested.emit()
-
-    @staticmethod
-    def _autostart_enabled() -> bool:
-        try:
-            return autostart.is_enabled()
-        except Exception:
-            log.exception("Couldn't read the autostart setting")
-            return False
-
-    def _set_autostart(self, enabled: bool) -> None:
-        try:
-            autostart.set_enabled(enabled)
-        except Exception as e:
-            log.exception("Couldn't change the autostart setting")
-            self.autostart.blockSignals(True)
-            self.autostart.setChecked(not enabled)
-            self.autostart.blockSignals(False)
-            self.message("PitPat", f"Couldn't change the startup setting: {e}", "error")
 
     def update_view(self, view: View) -> None:
         self.view = view

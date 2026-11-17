@@ -7,6 +7,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..plans import DISTANCE, KM, MAX_INCLINE, MAX_SPEED, MILES, TIME, Plan, Point, validate
+from .theme import tokens
+from .widgets import ProfileChart, card, make_button
 
 
 def _spin(value: float, maximum: float, decimals: int = 1, step: float = 0.1) -> QDoubleSpinBox:
@@ -24,11 +26,12 @@ class PlanEditor(QDialog):
     def __init__(self, plan: Optional[Plan] = None, taken_names: frozenset = frozenset(), parent=None):
         super().__init__(parent)
         self.plan: Optional[Plan] = None
+        self.action = "save"  # "duplicate" or "delete" when one of those buttons closed the dialog
         self.original_name = plan.name if plan else None
         self.taken = taken_names - ({plan.name} if plan else set())
         plan = plan or Plan("", MILES, DISTANCE, 2.0, (Point(0.0, 2.5), Point(1.0, 3.0)))
         self.setWindowTitle("Edit plan" if self.original_name else "New plan")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(560)
 
         self.name = QLineEdit(plan.name)
         self.name.setPlaceholderText("e.g. Morning hills")
@@ -70,15 +73,30 @@ class PlanEditor(QDialog):
 
         self.summary = QLabel()
         self.summary.setWordWrap(True)
+        self.preview = ProfileChart()
+        preview_card = card()
+        preview_layout = QVBoxLayout(preview_card)
+        preview_layout.setContentsMargins(12, 10, 12, 6)
+        preview_layout.addWidget(self.preview)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         self.buttons.accepted.connect(self.save)
         self.buttons.rejected.connect(self.reject)
+        self.buttons.button(QDialogButtonBox.StandardButton.Save).setProperty("kind", "accent")
+        # Only for a plan that already exists.
+        self.duplicate_button = make_button("Duplicate")
+        self.delete_button = make_button("Delete", kind="danger")
+        self.duplicate_button.clicked.connect(lambda: self._finish("duplicate"))
+        self.delete_button.clicked.connect(lambda: self._finish("delete"))
+        for extra in (self.duplicate_button, self.delete_button):
+            extra.setVisible(self.original_name is not None)
+            self.buttons.addButton(extra, QDialogButtonBox.ButtonRole.ActionRole)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(QLabel("Points: where the speed and incline change"))
         layout.addWidget(self.table)
         layout.addLayout(buttons_row)
+        layout.addWidget(preview_card)
         layout.addWidget(self.summary)
         layout.addWidget(self.buttons)
 
@@ -162,9 +180,15 @@ class PlanEditor(QDialog):
         save = self.buttons.button(QDialogButtonBox.StandardButton.Save)
         save.setEnabled(not errors)
         if errors:
-            self.summary.setText(f'<span style="color:#dc2626">{errors[0]}</span>')
+            self.summary.setText('<span style="color:%s">%s</span>' % (tokens()["danger"], errors[0]))
         else:
             self.summary.setText(self.current().summary())
+        plan = self.current()
+        self.preview.set_plan(plan if plan.points and plan.total > 0 else None)
+
+    def _finish(self, action: str) -> None:
+        self.action = action
+        self.accept()
 
     def save(self) -> None:
         if not self.problems():

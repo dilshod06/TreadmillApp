@@ -42,6 +42,8 @@ class Config:
     rest_limit: bool = True
     rest_after_minutes: float = 120.0
     rest_minutes: float = 15.0
+    # The units of the treadmill last seen, for showing the saved history in miles or kilometres.
+    imperial: bool = True
 
     @classmethod
     def load(cls) -> "Config":
