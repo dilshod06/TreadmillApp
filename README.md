@@ -32,6 +32,112 @@ remove, `uv tool uninstall pitpat`.
 
 Then run `pitpat` (or `python -m pitpat`).
 
+## Desktop app and tray icon
+
+There's also a windowed version that lives in the system tray. It needs the
+`gui` extra (PySide6):
+
+```bash
+uv tool install "pitpat[gui] @ git+https://github.com/jamers99/pitpat-treadmill-control.git"
+pitpat-gui              # open the window
+pitpat-gui --minimized  # start in the tray only
+```
+
+From a clone: `uv tool install -e ".[gui]"`.
+
+- **Window:** live speed, time, distance, steps and calories, with the same
+  controls as the terminal app. Space, ↑ ↓ and 1–9 work as shortcuts, and
+  right-clicking a preset saves the current speed there.
+- **Tray icon:** shows the current speed and turns green, amber or grey with the
+  belt's state. Hover for time and distance. Click to show or hide the window;
+  right-click for start/pause, speed ±0.1, presets, stop and quit.
+- **Closing the window** keeps it running in the tray. Quit from the tray menu,
+  which pauses the belt first if it's moving.
+- **Start with Windows** (tray menu) launches it in the tray at login. It
+  retries quietly until your treadmill is on.
+- Only one copy runs at a time; launching it again brings up the open window.
+
+### Modes: Normal and Countdown
+
+The window has three tabs under the connection line: the two modes, and **Settings** (below).
+The tabs only change what you see: a plan keeps running when you look at another one, the
+Countdown tab shows its progress ("Countdown · 40%"), and Normal shows a bar you can click
+to get back to it.
+
+- **Normal** is the manual control described above: you set the speed.
+- **Countdown** follows a plan. Each plan has a length, either a **distance**
+  (say 2 miles) or a **time** (say 30 minutes), and a list of **points** that say
+  where along it the speed and incline change. The first point is the start, so a
+  plan of "3 miles at 3 mph, incline 1" is a single point; adding more points
+  makes it variable ("at 0.5 mi go to 3.5 mph, incline 2; at 1.5 mi ease to 2.5").
+  Make as many plans as you like with **New plan…**, then press **▶ Run** on one
+  (or pick it from the tray's **Plans** menu). It starts the belt if it's stopped
+  and goes.
+
+While a plan runs you can still use the − / + buttons, the presets or an exact
+speed. Your speed holds until the plan reaches its next point, which then takes
+over again. **Skip to next point** jumps ahead, and **End plan** hands control back with the belt carrying on. Pressing **Stop** ends the
+plan too. At the end the plan stops the belt, unless you turned that off for it.
+If the connection drops the plan ends, since the treadmill's counters can't be
+trusted across a reconnect.
+
+Progress comes from the treadmill's own distance and time counters, so pausing
+pauses the plan. During a plan the window's **Distance** card (or **Time**, for a time
+plan) counts down from the plan's length to 0 instead of up; it is the app's display, and
+the treadmill's own screen is unchanged. Right-click a plan to duplicate or delete it. Plans are kept in
+the same `config.json` as your presets.
+
+**Incline.** The treadmill takes its incline from the same command as the speed,
+and the app can send it, but this is **off until you tick "Let the app set the
+incline"** on the Settings tab. The belt must be running for the
+incline to move.
+
+- **Off (the default):** the app never changes the incline. A plan tells you
+  what to set at each point, and the run panel compares the target with what
+  the treadmill reports.
+- **On:** a plan sets the incline at each point, and the window (and tray) get
+  incline − / + buttons. Like speed, an incline you change by hand holds until
+  the plan's next point.
+
+Either way, speed changes made in the app keep whatever incline the treadmill is
+at, so using the app doesn't flatten an incline you set with the remote.
+
+### Pause when you step off
+
+The treadmill can tell whether someone is on the belt. Tick **Pause the belt if
+I'm off it for N seconds** on the Settings tab and set the seconds (3 to 600). It's off
+by default.
+
+- It pauses the belt once you've been off it for that long. Pausing is the same
+  as pressing Pause, so a Countdown plan waits too, and Start carries on.
+- It only starts watching once you've been on the belt since it started, so you can
+  start the belt and then step on.
+- The window shows "On the belt", or "Off the belt · pausing in N s".
+- It reads the treadmill's load sensor, which reacts in about two seconds, so very
+  short settings can pause on a stumble. Tested on one PitPat T01 at walking speed
+  only, so try it at your own speeds before relying on it. It does nothing on a
+  treadmill that doesn't report it, and says so.
+
+### Rest
+
+The manual asks for a rest after a long run. On the Settings tab, **Make the treadmill
+rest** is on by default: after **120 minutes** of the belt running it is paused, you are
+told it needs to cool down, and the app won't start it again until it has rested
+**15 minutes**. Both numbers are yours to set (10 to 600 minutes of running, 1 to 120 of rest).
+
+- A rest has to be the full length: a shorter pause doesn't reset the clock.
+- The window shows "Rest in 1:12:00", then "Cooling down · 9:30" once it's due. Starting
+  from the remote during a rest is paused again.
+- The running time is counted by the app while it is open, so quitting it forgets the
+  count. Untick the setting to turn the limit off.
+
+### Settings tab
+
+Incline, stepping off and rest are all set here. The tray menu has **Settings…** to open it.
+
+It shares its saved treadmill and presets with the terminal app, but run only one
+of them at a time, since a treadmill accepts a single Bluetooth connection.
+
 ## Usage
 
 ```

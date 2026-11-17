@@ -32,6 +32,10 @@ HEARTBEAT = bytes.fromhex("6a05fdf843")
 # the treadmill's display unit is set to.
 KM_PER_MILE = 1.609344
 
+# Below this load reading (status byte 40) nobody is standing on the belt. An
+# empty belt reads 6-14 and someone walking on it 34-70; see docs/FIRMWARE-VARIANT.md.
+OFF_BELT_LOAD = 20
+
 USER_ID = 58965456623  # Not validated by the treadmill; any value works.
 WEIGHT_KG = 80
 
@@ -56,19 +60,27 @@ def _xor(data: bytes) -> int:
     return result
 
 
-def command(cmd: Command, speed: int = 0, imperial: bool = False, ramp: int = 1) -> bytes:
+def command(cmd: Command, speed: int = 0, imperial: bool = False, ramp: int = 1, incline: int = 0) -> bytes:
     """Builds a 23-byte command frame.
 
     `speed` is in thousandths of a kph and `ramp` is the acceleration time in
     seconds (1 or 5). The unit flag must match the treadmill's display unit.
+
+    `incline` is byte 9: the incline level (0 to the treadmill's max, 12 on the
+    one tested) the treadmill goes to, while the belt runs. It is absolute, so a
+    command that leaves it at 0 asks for a flat belt. Confirmed with
+    tools/incline_probe.py; see docs/FIRMWARE-VARIANT.md.
     """
     if not 0 <= speed <= 0xFFFF:
         raise ValueError(f"speed out of range: {speed}")
+    if not 0 <= incline <= 0xFF:
+        raise ValueError(f"incline out of range: {incline}")
     packet = bytearray(23)
     packet[0] = 0x6A
     packet[1] = 0x17
     packet[6:8] = speed.to_bytes(2, "big")
     packet[8] = ramp
+    packet[9] = incline
     packet[10] = WEIGHT_KG
     packet[12] = cmd | 0x08 if imperial else cmd
     packet[13:21] = USER_ID.to_bytes(8, "big")
@@ -77,12 +89,12 @@ def command(cmd: Command, speed: int = 0, imperial: bool = False, ramp: int = 1)
     return bytes(packet)
 
 
-def start(speed: int, imperial: bool) -> bytes:
-    return command(Command.START_OR_SET, speed, imperial)
+def start(speed: int, imperial: bool, incline: int = 0) -> bytes:
+    return command(Command.START_OR_SET, speed, imperial, incline=incline)
 
 
-def set_speed(speed: int, imperial: bool) -> bytes:
-    return command(Command.START_OR_SET, speed, imperial, ramp=5)
+def set_speed(speed: int, imperial: bool, incline: int = 0) -> bytes:
+    return command(Command.START_OR_SET, speed, imperial, ramp=5, incline=incline)
 
 
 def pause(imperial: bool) -> bytes:
@@ -117,6 +129,11 @@ class Status:
     imperial: bool
     state: State
     serial: Optional[str] = None  # Only in the occasional identity frame
+    # Whether someone is on the belt, from the regular extended frame only (None in
+    # other frame kinds): a load reading, and the treadmill's own "off the belt"
+    # flag, which it raises about 10 seconds after the load drops.
+    load: Optional[int] = None
+    off_belt_flag: Optional[bool] = None
 
     @classmethod
     def parse(cls, frame: bytes) -> Optional["Status"]:
@@ -134,7 +151,7 @@ class Status:
         flags = frame[26]
         state = {24: State.STARTING, 8: State.RUNNING, 16: State.PAUSED}.get(flags & 24, State.STOPPED)
         steps = u32(14)
-        serial = None
+        serial = load = off_belt_flag = None
         # Newer firmware sends two long frame kinds: an occasional identity frame
         # with the serial at 32-47, and the regular extended frame with a
         # motor-derived step count at 43-44 (bytes 14-17 then stay 0).
@@ -145,6 +162,7 @@ class Status:
                 steps = steps or None
             else:
                 steps = u16(43)
+                load, off_belt_flag = frame[40], bool(frame[32])
         duration = u32(20)
 
         return cls(
@@ -164,7 +182,16 @@ class Status:
             imperial=bool(flags & 128),
             state=state,
             serial=serial,
+            load=load,
+            off_belt_flag=off_belt_flag,
         )
+
+    @property
+    def on_belt(self) -> Optional[bool]:
+        """Whether someone is standing on the belt, or None if this frame doesn't say."""
+        if self.load is None or self.off_belt_flag is None:
+            return None
+        return self.load >= OFF_BELT_LOAD and not self.off_belt_flag
 
     @property
     def speed_unit(self) -> str:

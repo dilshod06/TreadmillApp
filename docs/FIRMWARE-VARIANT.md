@@ -83,6 +83,28 @@ Same layout as BA04 (see `Status.parse`). Notable offsets:
 | 26 | flags: bit 0 connected, bits 3–4 running state, bit 7 unit mode (1=imperial) |
 | 51 | XOR checksum over bytes 1–50 |
 
+### Is someone on the belt? (bytes 32 and 40)
+
+In the regular 50-byte frame (not the occasional 52-byte identity frame, where
+bytes 32-47 are the serial number), two bytes follow whether a person is standing
+on the belt. Found with `tools/presence_watch.py` on the firmware-37 T01, while the
+belt ran at 1 mph and the rider alternated between standing on it and stepping onto
+the side rails, three times:
+
+| Byte | Meaning | Observed |
+| --- | --- | --- |
+| 40 | load (instant) | 10-12 with nobody on it (6-14 over other runs), 34-70 walking on it. Reacts within about 2 s of stepping off or on |
+| 32 | "off the belt" flag | 0 while on. Became 1 about 10-11 s after stepping off, and went back to 0 within about 2 s of stepping back on |
+
+Nothing is reported while the belt is stopped: every byte was constant. The app
+treats a load under 20 or the flag set as "off" (`Status.on_belt`), so it can act
+sooner than the treadmill's own ~10 s flag, with the flag as a backstop.
+
+Caveats: one person, one treadmill, one speed (and 0 incline). The load is likely
+motor current, so an empty belt may read higher at speed or on an incline; if it
+rises above 20 the flag still catches it, just later. The BA04 revision's frames
+were not tested and don't carry these bytes in the layout we parse.
+
 ## Command frame (write to `fba1`, 23 bytes, sent bare)
 
 | Command | Packet |
@@ -96,6 +118,24 @@ Byte 12 is the command (0 stop, 2 pause, 4 start/set, `|0x08` imperial).
 User id is unvalidated — the hardcoded `USER_ID` works fine,
 no pairing/bonding required. Heartbeat/status-poll is the same shape at
 length 5: `6a 05 fd f8 43`.
+
+### Incline is byte 9
+
+In the table above byte 9 is the `00` after the ramp byte. It is the **incline
+level**, and a start/set-speed command sets the treadmill to it. Found with
+`tools/incline_probe.py` on the firmware-37 T01 (max incline 12):
+
+- Sending the belt's own speed with byte 9 = 1, 2, 3 moved both the reported
+  incline (status byte 11) and target (byte 12) to 1, 2, 3, one for one, the same
+  levels the remote and phone app use.
+- It is **absolute**. Sending 0 afterwards took the incline back to 0. So any
+  start/set-speed packet with byte 9 left at 0 flattens a raised treadmill. The
+  app therefore sends the treadmill's own current incline unless it is changing it.
+- It only takes effect while the belt is running.
+- Pause and stop packets were not tested with a non-zero byte 9 and the app
+  leaves theirs at 0.
+- Only 0–3 was tried, and only on this model. The app clamps to the max the
+  treadmill reports (status byte 29).
 
 ## Troubleshooting
 

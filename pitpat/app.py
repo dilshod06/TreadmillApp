@@ -1,9 +1,7 @@
 """The terminal UI."""
-import asyncio
 import logging
 import os
-import time
-from typing import Callable, Optional, Union
+from typing import Optional
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -13,34 +11,13 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Digits, Footer, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
-from . import ble, protocol
+from . import ble
 from .config import Config
-from .protocol import State, Status
+from .controller import (
+    CONNECTED, CONNECTING, FAILED, RECONNECTING, STATE_LABELS, Controller, TreadmillFactory, detail_rows, fmt_duration,
+)
 
 log = logging.getLogger(__name__)
-
-# How long to keep nudging the treadmill towards a requested speed or stop
-# before giving up. Starting from stopped includes a few seconds' countdown.
-GOAL_TIMEOUT = 15.0
-# Don't repeat an identical command more often than this while waiting for the
-# treadmill to act on it (it reports status about once a second).
-RESEND_AFTER = 2.5
-RECONNECT_DELAY = 3.0
-
-STATE_LABELS = {
-    State.STARTING: "STARTING",
-    State.RUNNING: "RUNNING",
-    State.PAUSED: "PAUSED",
-    State.STOPPED: "STOPPED",
-}
-
-# Builds the Treadmill; replaced in tests.
-TreadmillFactory = Callable[..., ble.Treadmill]
-
-
-def fmt_duration(seconds: float) -> str:
-    seconds = int(seconds)
-    return f"{seconds // 3600}:{seconds // 60 % 60:02}:{seconds % 60:02}"
 
 
 class DevicePicker(ModalScreen[Optional[str]]):
@@ -149,23 +126,10 @@ class Dashboard(Screen):
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self, config: Config, make_treadmill: TreadmillFactory, startup_speed: Optional[float]):
+    def __init__(self, controller: Controller):
         super().__init__()
-        self.config = config
-        self.make_treadmill = make_treadmill
-        self.treadmill: Optional[ble.Treadmill] = None
-        self.status: Optional[Status] = None
-        # What the user asked for and the treadmill hasn't done yet: a speed in
-        # display units, "stop", or None. Re-sent on each status until reached.
-        self.goal: Union[float, str, None] = startup_speed
-        self.goal_deadline: Optional[float] = None
-        self.last_sent: tuple[bytes, float] = (b"", 0.0)
-        # The speed last sent for the current goal.
-        self.sent_wire: Optional[int] = None
-        self.resume_speed: Optional[float] = None
+        self.controller = controller
         self.saving_preset = False
-        self.connecting = False
-        self.unconfirmed_steps: Optional[int] = None
 
     def compose(self) -> ComposeResult:
         yield Static("[dim]●[/] Not connected", id="connection")
@@ -186,215 +150,51 @@ class Dashboard(Screen):
 
     def on_mount(self) -> None:
         self.query_one("#details", DataTable).add_columns("Field", "Value")
+        c = self.controller
+        c.on_change = self.refresh_view
+        c.on_notify = lambda message, severity, title: self.notify(message, title=title, severity=severity)
+        c.on_pick_device = lambda auto_pick: self.action_pick_device(auto_pick=auto_pick)
         self.refresh_view()
-        if self.config.address:
-            self.connect(self.config.address)
-        else:
-            self.action_pick_device(auto_pick=True)
-
-    # --- Connection ---------------------------------------------------------
-
-    @work(exclusive=True, group="connection")
-    async def connect(self, address: str, retry: bool = False) -> None:
-        """Connects to `address`. With `retry`, keeps trying until it works."""
-        await self._drop_treadmill()
-        variant = self.config.variant if address.upper() == (self.config.address or "").upper() else None
-        self.connecting = True
-        while True:
-            self.set_connection(
-                f"[yellow]●[/] {'Reconnecting' if retry else 'Connecting'} to {address}…  [dim](c to choose another)[/]"
-            )
-            treadmill = self.make_treadmill(address, self.on_status, self.on_lost, variant)
-            try:
-                await treadmill.connect()
-                break
-            except Exception as e:
-                log.warning("Connect to %s failed: %s", address, e)
-                if not retry:
-                    self.connecting = False
-                    self.set_connection(f"[red]●[/] Couldn't connect to {address}")
-                    self.refresh_view()
-                    self.notify(f"{e or type(e).__name__}", title="Couldn't connect", severity="error")
-                    self.action_pick_device()
-                    return
-                await asyncio.sleep(RECONNECT_DELAY)
-
-        self.treadmill = treadmill
-        self.connecting = False
-        self.set_connection(f"[green]●[/] Connected to {address}")
-        self.config.address, self.config.variant = address, treadmill.variant
-        self.config.save()
-
-    def on_lost(self) -> None:
-        if self.treadmill is None:
-            return
-        address = self.treadmill.address
-        self.treadmill = None
-        self.status = None
-        self.goal = None
-        self.notify("Lost connection, reconnecting…", severity="warning")
-        self.connect(address, retry=True)
-        self.refresh_view()
-
-    async def _drop_treadmill(self) -> None:
-        treadmill, self.treadmill, self.status = self.treadmill, None, None
-        if treadmill:
-            try:
-                await treadmill.disconnect()
-            except Exception as e:
-                log.warning("Disconnect failed: %s", e)
-        self.refresh_view()
-
-    def set_connection(self, text: str) -> None:
-        self.query_one("#connection", Static).update(text)
-
-    # --- Driving the treadmill ----------------------------------------------
-
-    def on_status(self, status: Status) -> None:
-        if self.status is None or status.target_speed != self.status.target_speed:
-            log.info("Treadmill target now %d (%.2f %s)", status.target_speed,
-                     status.to_display(status.target_speed), status.speed_unit)
-        if self.status:
-            # Frame kinds alternate, and not every kind carries these.
-            status.steps = self.filter_steps(status.steps, self.status.steps)
-            status.serial = status.serial or self.status.serial
-        self.status = status
-        if status.state == State.RUNNING and status.target_speed:
-            self.resume_speed = status.to_display(status.target_speed)
-        self.drive()
-        self.refresh_view()
-
-    def filter_steps(self, new: Optional[int], old: Optional[int]) -> Optional[int]:
-        """Keeps the last count through frames without one, and ignores a lone
-        implausible reading (seen once as the belt starts) until a second agrees."""
-        if new is None or old is None or 0 <= new - old <= 20 or new == self.unconfirmed_steps:
-            self.unconfirmed_steps = None
-            return old if new is None else new
-        self.unconfirmed_steps = new
-        return old
-
-    def set_goal(self, goal: Union[float, str, None]) -> None:
-        self.goal = goal
-        self.goal_deadline = None
-        self.last_sent = (b"", 0.0)
-        self.sent_wire = None
-        self.drive()
-        self.refresh_view()
-
-    def send(self, packet: bytes) -> None:
-        """Queues `packet`, unless the identical one went out moments ago."""
-        if self.treadmill is None:
-            return
-        last_packet, last_time = self.last_sent
-        if packet == last_packet and time.monotonic() - last_time < RESEND_AFTER:
-            return
-        self.last_sent = (packet, time.monotonic())
-        self.treadmill.send(packet)
-
-    def drive(self) -> None:
-        """Sends whatever command moves the treadmill towards self.goal."""
-        s = self.status
-        if self.goal is None or s is None or self.treadmill is None:
-            return
-        if self.goal_deadline is None:
-            self.goal_deadline = time.monotonic() + GOAL_TIMEOUT
-        elif time.monotonic() > self.goal_deadline:
-            self.notify("The treadmill didn't respond to the last command.", severity="warning")
-            self.goal = None
-            return
-
-        if self.goal == "stop":
-            if s.state == State.RUNNING:
-                self.send(protocol.pause(s.imperial))  # It only stops from paused.
-            elif s.state == State.PAUSED:
-                self.send(protocol.stop(s.imperial))
-            elif s.state == State.STOPPED:
-                self.goal = None
-            return
-
-        wanted = s.to_wire(self.goal)
-        if s.state in (State.PAUSED, State.STOPPED):
-            self.send(protocol.start(wanted, s.imperial))
-        elif s.state == State.RUNNING:
-            if round(s.to_display(s.target_speed), 1) == round(s.to_display(wanted), 1):
-                self.goal = None
-                return
-            if self.sent_wire is None:
-                wire = wanted
-            elif time.monotonic() - self.last_sent[1] >= RESEND_AFTER:
-                # The treadmill rounds to its own 0.1 steps and some values land
-                # on the step below, so aim off by half the miss and try again.
-                wire = self.sent_wire + (wanted - s.target_speed) // 2
-                wire = max(0, min(wire, s.max_speed or 0xFFFF))
-            else:
-                wire = self.sent_wire  # Give it time to act first.
-            self.sent_wire = wire
-            self.send(protocol.set_speed(wire, s.imperial))
-
-    def require_status(self) -> Optional[Status]:
-        if self.status is None:
-            self.notify("Not connected to a treadmill yet.", severity="warning")
-        return self.status
+        c.start()
 
     # --- Actions --------------------------------------------------------------
 
     def action_toggle(self) -> None:
-        s = self.require_status()
-        if s is None:
-            return
-        if s.state in (State.RUNNING, State.STARTING) or isinstance(self.goal, float):
-            self.goal = None
-            self.send(protocol.pause(s.imperial))
-            self.refresh_view()
-        else:
-            self.set_goal(self.resume_speed or self.config.presets[0])
+        self.controller.toggle()
 
     def action_stop(self) -> None:
-        if self.require_status():
-            self.set_goal("stop")
+        self.controller.stop()
 
     def action_nudge(self, step: float) -> None:
-        s = self.require_status()
-        if s is None:
-            return
-        if isinstance(self.goal, float):
-            base = self.goal
-        elif s.state == State.RUNNING:
-            base = s.to_display(s.target_speed)
-        else:
-            self.notify("Start the belt first (Space or a preset).")
-            return
-        max_speed = s.to_display(s.max_speed) if s.max_speed else float("inf")
-        self.set_goal(round(min(max(base + step, 0.1), max_speed), 1))
+        self.controller.nudge(step)
 
     def action_preset(self, n: int) -> None:
         if self.saving_preset:
             self.saving_preset = False
-            speed = self.current_speed()
-            self.config.presets[n - 1] = speed
-            self.config.save()
-            self.notify(f"Saved {speed:.1f} to key {n}.")
+            self.controller.save_preset(n)
             self.refresh_view()
-        elif self.require_status():
-            self.set_goal(self.config.presets[n - 1])
+        else:
+            self.controller.go_preset(n)
 
     def action_type_speed(self) -> None:
-        s = self.require_status()
+        s = self.controller.status
         if s is None:
+            self.controller.notify("Not connected to a treadmill yet.", "warning")
             return
 
         def chosen(speed: Optional[float]) -> None:
-            if speed is not None and speed > 0:
-                self.set_goal(speed)
+            if speed is not None:
+                self.controller.set_speed(speed)
 
         self.app.push_screen(SpeedPrompt(f"Speed in {s.speed_unit}, then Enter (Esc cancels)"), chosen)
 
     def action_save_preset(self) -> None:
-        if self.current_speed() is None:
+        speed = self.controller.current_speed()
+        if speed is None:
             self.notify("Get the belt running at the speed you want first.")
             return
         self.saving_preset = True
-        self.notify(f"Press 1–9 to save {self.current_speed():.1f} there (Esc cancels).")
+        self.notify(f"Press 1–9 to save {speed:.1f} there (Esc cancels).")
 
     def action_cancel(self) -> None:
         self.saving_preset = False
@@ -403,47 +203,31 @@ class Dashboard(Screen):
         self.query_one("#details").toggle_class("shown")
 
     def action_pick_device(self, auto_pick: bool = False) -> None:
-        if self.connecting:
-            # Connecting scans for the device too, and BlueZ allows one scan at a time.
-            self.workers.cancel_group(self, "connection")
-            self.connecting = False
-            self.set_connection("[dim]●[/] Not connected")
-            self.refresh_view()
+        self.controller.cancel_connect()
 
         def chosen(address: Optional[str]) -> None:
             if address:
-                self.connect(address)
+                self.controller.connect(address)
 
-        self.app.push_screen(DevicePicker(self.config.address, auto_pick), chosen)
+        self.app.push_screen(DevicePicker(self.controller.config.address, auto_pick), chosen)
 
     async def action_quit(self) -> None:
         """Pauses the belt if it's moving, then exits."""
-        self.workers.cancel_group(self, "connection")
-        if self.treadmill and self.status and self.status.state in (State.RUNNING, State.STARTING):
-            self.notify("Pausing the belt…")
-            try:
-                await asyncio.wait_for(self.treadmill.send(protocol.pause(self.status.imperial)), 3)
-            except Exception as e:
-                log.warning("Couldn't pause before quitting: %s", e)
-        await self._drop_treadmill()
+        await self.controller.shutdown()
         self.app.exit()
-
-    def current_speed(self) -> Optional[float]:
-        s = self.status
-        if s and s.state == State.RUNNING and s.target_speed:
-            return round(s.to_display(s.target_speed), 1)
-        return None
 
     # --- Rendering ----------------------------------------------------------
 
     def refresh_view(self) -> None:
-        s = self.status
+        c = self.controller
+        s = c.status
         state = self.query_one("#state", Label)
         target = self.query_one("#target", Label)
         state.set_classes(STATE_LABELS[s.state].lower() if s else "")
+        self.render_connection()
 
         if s is None:
-            idle = self.treadmill is None and not self.connecting
+            idle = c.treadmill is None and not c.connecting
             state.update("NOT CONNECTED" if idle else "WAITING FOR TREADMILL")
             self.query_one("#speed", Digits).update("--")
             target.update("Press [b]c[/] to choose a treadmill" if idle else "")
@@ -453,9 +237,9 @@ class Dashboard(Screen):
             state.update(STATE_LABELS[s.state])
             self.query_one("#speed", Digits).update(f"{s.to_display(s.speed):.1f}")
             line = f"{s.speed_unit}  ·  target {s.to_display(s.target_speed):.1f}  ·  max {s.to_display(s.max_speed):.1f}"
-            if isinstance(self.goal, float):
-                line += f"  ·  [b]→ {self.goal:.1f}[/]"
-            elif self.goal == "stop":
+            if isinstance(c.goal, float):
+                line += f"  ·  [b]→ {c.goal:.1f}[/]"
+            elif c.goal == "stop":
                 line += "  ·  [b]stopping…[/]"
             target.update(line)
             self.query_one("#time", Label).update(fmt_duration(s.duration_s))
@@ -463,11 +247,11 @@ class Dashboard(Screen):
             self.query_one("#steps", Label).update("--" if s.steps is None else f"{s.steps:,}")
             self.query_one("#calories", Label).update(f"{s.calories} kcal")
 
-        current = self.current_speed()
-        goal = self.goal if isinstance(self.goal, float) else None
+        current = c.current_speed()
+        goal = c.goal if isinstance(c.goal, float) else None
         max_speed = s.to_display(s.max_speed) if s and s.max_speed else float("inf")
         chips = []
-        for n, speed in enumerate(self.config.presets, 1):
+        for n, speed in enumerate(c.config.presets, 1):
             active = speed == (goal if goal is not None else current)
             chip = f"[b $accent]{n}[/] {speed:.1f}"
             if active:
@@ -482,28 +266,20 @@ class Dashboard(Screen):
 
         self.update_details()
 
+    def render_connection(self) -> None:
+        c = self.controller
+        text = {
+            CONNECTING: f"[yellow]●[/] Connecting to {c.conn_address}…  [dim](c to choose another)[/]",
+            RECONNECTING: f"[yellow]●[/] Reconnecting to {c.conn_address}…  [dim](c to choose another)[/]",
+            CONNECTED: f"[green]●[/] Connected to {c.conn_address}",
+            FAILED: f"[red]●[/] Couldn't connect to {c.conn_address}",
+        }.get(c.conn_state, "[dim]●[/] Not connected")
+        self.query_one("#connection", Static).update(text)
+
     def update_details(self) -> None:
         table = self.query_one("#details", DataTable)
         table.clear()
-        s = self.status
-        if s is None:
-            return
-        unit = s.speed_unit
-        rows = [
-            ("Address", self.treadmill.address if self.treadmill else "-"),
-            ("Variant", (self.treadmill.variant or "-") if self.treadmill else "-"),
-            ("State", STATE_LABELS[s.state]),
-            ("Speed", f"{s.to_display(s.speed):.2f} {unit}"),
-            ("Target speed", f"{s.to_display(s.target_speed):.2f} {unit}"),
-            ("Max speed", f"{s.to_display(s.max_speed):.2f} {unit}"),
-            ("Incline", f"{s.incline}° (target {s.target_incline}°, max {s.max_incline}°)"),
-            ("Heart rate", f"{s.heart_rate} bpm" if s.heart_rate else "-"),
-            ("Units", "Imperial" if s.imperial else "Metric"),
-            ("Firmware", str(s.firmware)),
-            ("Device type", str(s.device_type)),
-            ("Serial", s.serial or "-"),
-        ]
-        table.add_rows(rows)
+        table.add_rows(detail_rows(self.controller.view()))
 
 
 def terminal_is_light() -> bool:
@@ -540,9 +316,10 @@ class PitPatApp(App):
     #prompt { width: 44; height: auto; border: round $primary; background: $background; padding: 1 2; }
     """
 
-    def __init__(self, config: Config, startup_speed: Optional[float] = None, make_treadmill: TreadmillFactory = ble.Treadmill):
+    def __init__(self, config: Config, startup_speed: Optional[float] = None, make_treadmill: Optional[TreadmillFactory] = None):
         super().__init__()
-        self.dashboard = Dashboard(config, make_treadmill, startup_speed)
+        self.controller = Controller(config, make_treadmill or ble.Treadmill, startup_speed)
+        self.dashboard = Dashboard(self.controller)
 
     def on_mount(self) -> None:
         # Draw with the terminal's own background and palette rather than Textual's.

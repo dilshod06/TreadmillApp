@@ -1,4 +1,4 @@
-"""Settings kept between runs: last treadmill, variant and speed presets."""
+"""Settings kept between runs: last treadmill, variant, speed presets and plans."""
 import json
 import logging
 import os
@@ -29,6 +29,19 @@ class Config:
     variant: Optional[str] = None  # None = detect on connect
     # Speeds for keys 1-9, in the treadmill's display unit (km/h or mph).
     presets: list[float] = field(default_factory=lambda: [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0])
+    # Countdown plans as dicts; see plans.Plan.to_dict.
+    plans: list[dict] = field(default_factory=list)
+    # Whether the app may change the treadmill's incline (plans, incline buttons).
+    # Off until the person turns it on; the app then only reminds.
+    auto_incline: bool = False
+    # Pause the belt when the treadmill says nobody is on it for this many seconds.
+    off_belt_pause: bool = False
+    off_belt_seconds: float = 10.0
+    # The manual asks for a rest after a long run: pause the belt after this many
+    # minutes of running, and don't start again until it has rested this long.
+    rest_limit: bool = True
+    rest_after_minutes: float = 120.0
+    rest_minutes: float = 15.0
 
     @classmethod
     def load(cls) -> "Config":

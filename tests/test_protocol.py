@@ -9,9 +9,24 @@ SAMPLE = bytes.fromhex(
 USER_ID = "0000000dba9d76ef"
 
 
-def frame(speed=0, target=0, distance=0, duration_ms=0, flags=0, max_speed=6000) -> bytes:
-    """SAMPLE with the given fields set and the checksum fixed up."""
+def frame(speed=0, target=0, distance=0, duration_ms=0, flags=0, max_speed=6000,
+          incline=0, target_incline=None, max_incline=0, load=None, off_belt=False) -> bytes:
+    """SAMPLE with the given fields set and the checksum fixed up.
+
+    With `load`, it is the regular 50-byte frame newer firmware sends most of the
+    time instead (SAMPLE is its occasional identity frame), carrying the
+    presence reading: a load, and the treadmill's own "off the belt" flag.
+    """
     f = bytearray(SAMPLE)
+    if load is not None:
+        f = f[:50]
+        f[1] = 50
+        f[32:48] = bytes(16)
+        f[32], f[40] = int(off_belt), load
+        f[48], f[49] = 0, 0x43
+    f[11] = incline
+    f[12] = incline if target_incline is None else target_incline
+    f[29] = max_incline
     f[3:5] = speed.to_bytes(2, "big")
     f[5:7] = target.to_bytes(2, "big")
     f[7:11] = distance.to_bytes(4, "big")

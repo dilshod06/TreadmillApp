@@ -17,13 +17,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-asyncio"]
+gui = ["PySide6-Essentials>=6.6"]
+test = ["pytest", "pytest-asyncio", "PySide6-Essentials>=6.6"]
 
 [project.scripts]
 pitpat = "pitpat.__main__:main"
 
+[project.gui-scripts]
+pitpat-gui = "pitpat.gui.__main__:main"
+
 [tool.setuptools]
-packages = ["pitpat"]
+packages = ["pitpat", "pitpat.gui"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
