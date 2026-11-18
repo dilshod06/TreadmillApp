@@ -141,7 +141,9 @@ number as an estimate.
 
 Every workout is saved to the **History** tab, by day. A workout runs from when the belt
 first moves until the treadmill stops, whether you pressed Stop, a plan finished, or you
-used the remote. Pausing doesn't end it, and quitting or losing the connection saves
+used the remote. Pausing doesn't end it, and neither does a stop you carry on from within
+three minutes (the treadmill sometimes reports a pause as a stop, and picks up its
+counters again). Quitting or losing the connection saves
 what was done so far. Under about 0.01 mile isn't saved. Pick **This week**, **Last
 week**, **Last 4 weeks** or **Pick dates** to see distance, floors, workouts and time, a
 chart per day (per week for long ranges), a week-by-week table and the daily records.

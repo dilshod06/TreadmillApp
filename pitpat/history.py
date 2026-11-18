@@ -7,6 +7,7 @@ are asked for, so nothing else needs to be kept in step.
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -22,6 +23,7 @@ METRES_PER_MILE = 1609.344
 FLOORS_PER_MILE_PER_PERCENT = 5.28
 MIN_METRES = 16.0  # Under about 0.01 mi isn't worth a line in the history
 SHORT_RANGE_DAYS = 31  # Longer than this is charted by week instead of by day
+NO_PLAN = "No plan"  # What a workout is called when it was run by hand
 
 
 def history_path() -> Path:
@@ -40,6 +42,17 @@ class Workout:
     @property
     def date(self) -> date:
         return date.fromisoformat(self.day)
+
+    @property
+    def began(self) -> datetime:
+        try:
+            return datetime.fromisoformat(self.start)
+        except ValueError:
+            return datetime.combine(self.date, datetime.min.time())
+
+    @property
+    def plan_name(self) -> str:
+        return self.plan or NO_PLAN
 
     def to_dict(self) -> dict:
         return {"day": self.day, "start": self.start, "metres": round(self.metres, 1),
@@ -99,7 +112,14 @@ class History:
         temp = self.path.with_name(self.path.name + ".tmp")
         data = {"version": 1, "workouts": [w.to_dict() for w in self.workouts]}
         temp.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
-        os.replace(temp, self.path)
+        for attempt in range(5):  # Windows briefly refuses while a scanner or indexer has the file open
+            try:
+                os.replace(temp, self.path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
 
 
 # --- Summaries ---------------------------------------------------------------------------------
@@ -183,6 +203,10 @@ def daily_records(workouts: Iterable[Workout], first: date, last: date) -> list[
     return [DayRecord(d, totals(w for w in items if w.date == d)) for d in sorted({w.date for w in items}, reverse=True)]
 
 
+def workouts_newest_first(workouts: Iterable[Workout], first: date, last: date) -> list[Workout]:
+    return sorted(within(workouts, first, last), key=lambda w: w.began, reverse=True)
+
+
 def preset_range(name: str, today: date) -> tuple[date, date]:
     """The dates for a named range: "week", "last" (week) or "four" (weeks, ending this week)."""
     monday = week_start(today)
@@ -213,6 +237,18 @@ def fmt_minutes(seconds: float) -> str:
     return f"{minutes // 60} h {minutes % 60} min" if minutes >= 60 else f"{minutes} min"
 
 
+def fmt_duration(seconds: float) -> str:
+    """Time as h:mm:ss or m:ss, to the second."""
+    whole = round(seconds)
+    hours, rest = divmod(whole, 3600)
+    return f"{hours}:{rest // 60:02d}:{rest % 60:02d}" if hours else f"{rest // 60}:{rest % 60:02d}"
+
+
+def fmt_when(moment: datetime) -> str:
+    hour = moment.hour % 12 or 12
+    return f"{moment:%a, %b} {moment.day} · {hour}:{moment.minute:02d} {'AM' if moment.hour < 12 else 'PM'}"
+
+
 def fmt_range(first: date, last: date) -> str:
     if first.year == last.year:
         return f"{first:%b} {first.day} – {last:%b} {last.day}, {last.year}"
@@ -238,4 +274,11 @@ def summary_text(workouts: Iterable[Workout], first: date, last: date, imperial:
             start = week_start(week.first)
             lines.append(f"{start:%b} {start.day}: {distance(week.totals.metres, imperial):.1f} {unit}, "
                          f"{fmt_floors(week.totals.floors)}")
+    if count <= SHORT_RANGE_DAYS:  # Each workout, newest first, with its plan and time
+        listed = workouts_newest_first(items, first, last)
+        if listed:
+            lines += ["", "Workouts"]
+            for w in listed:
+                lines.append(f"{fmt_when(w.began)} · {w.plan_name} · {fmt_duration(w.seconds)} · "
+                             f"{distance(w.metres, imperial):.2f} {unit} · {fmt_floors(w.floors)}")
     return "\n".join(lines)

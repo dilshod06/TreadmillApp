@@ -121,7 +121,9 @@ def test_summary_text_for_a_week_and_for_longer_ranges():
     week = h.summary_text(items, date(2026, 11, 16), date(2026, 11, 22), imperial=True)
     assert week.splitlines() == [
         "PitPat summary · Nov 16 – Nov 22, 2026", "Distance: 3.5 mi", "Floors climbed: 14",
-        "Workouts: 2 (active on 2 of 7 days)", "Time: 50 min",
+        "Workouts: 2 (active on 2 of 7 days)", "Time: 50 min", "", "Workouts",
+        "Wed, Nov 18 · 7:00 AM · No plan · 30:00 · 1.50 mi · 4 floors",
+        "Mon, Nov 16 · 7:00 AM · No plan · 20:00 · 2.00 mi · 10 floors",
     ]
     long = h.summary_text(items, date(2026, 11, 9), date(2026, 11, 22), imperial=False)
     assert "Week by week" in long and "Nov 9: 8.0 km, 1 floor" in long and "Nov 16: 5.6 km, 14 floors" in long
@@ -142,6 +144,8 @@ async def connected(**cfg):
     c.notices = []
     c.on_notify = lambda message, severity, title: c.notices.append((message, severity, title))
     c.wall = lambda: datetime(2026, 11, 17, 9, 30, 15)
+    c.now = 1000.0
+    c.clock = lambda: c.now
     c.start()
     await c._connect_task
     return c, FakeTreadmill.instances[-1]
@@ -149,6 +153,13 @@ async def connected(**cfg):
 
 def saved():
     return History.load().workouts
+
+
+def stop_for_good(c, t, **counters):
+    """The treadmill reports stopped, and stays that way long enough for the workout to be over."""
+    t.feed(flags=STOPPED, **counters)
+    c.now += 181
+    t.feed(flags=STOPPED, **counters)
 
 
 async def test_a_workout_is_saved_when_the_belt_stops_with_its_floors():
@@ -160,12 +171,17 @@ async def test_a_workout_is_saved_when_the_belt_stops_with_its_floors():
     t.feed(flags=PAUSED, distance=1609, duration_ms=600_000, incline=5)
     assert saved() == []  # Pausing doesn't end it
     t.feed(flags=STOPPED, distance=1609, duration_ms=600_000)
+    assert saved() == []  # A stop alone could still be a pause
+    c.now += 181
+    t.feed(flags=STOPPED, distance=1609, duration_ms=600_000)
 
     (w,) = saved()
     assert w.day == "2026-11-17" and w.start == "2026-11-17T09:30:15"
     assert w.metres == pytest.approx(1609) and w.seconds == 600 and w.floors == pytest.approx(26.4, abs=0.05)
     assert c.view().workouts == (w,) and c.view().floors == 0
     assert c.notices[-1][2] == "Workout saved" and "1.61 km and 26.4 floors added to today" in c.notices[-1][0]
+    t.feed(flags=STOPPED)
+    c.now += 181
     t.feed(flags=STOPPED)
     assert len(saved()) == 1  # Further stopped frames don't add more
 
@@ -193,14 +209,14 @@ async def test_a_few_steps_are_not_a_workout():
     c, t = await connected()
     t.feed(flags=RUNNING, target=1000, speed=1000, distance=0)
     t.feed(flags=RUNNING, target=1000, speed=1000, distance=10)
-    t.feed(flags=STOPPED)
+    stop_for_good(c, t)
     assert saved() == [] and not any(n[2] == "Workout saved" for n in c.notices)
 
 
 async def test_joining_a_session_already_under_way_counts_it_from_the_treadmills_counters():
     c, t = await connected()
     t.feed(flags=RUNNING, target=3000, speed=3000, distance=1500, duration_ms=480_000, incline=2, max_incline=12)
-    t.feed(flags=STOPPED, distance=1500, duration_ms=480_000)
+    stop_for_good(c, t, distance=1500, duration_ms=480_000)
     (w,) = saved()
     assert w.metres == 1500 and w.seconds == 480 and w.floors == 0  # Floors only from when we joined
 
@@ -228,7 +244,7 @@ async def test_the_plan_that_was_run_is_recorded_and_units_are_remembered():
     assert c.view().imperial is False and Config.load().imperial is False  # This treadmill is metric
     c.start_plan(Plan("Hills", MILES, DISTANCE, 5.0, (Point(0, 2.0),)))
     t.feed(flags=RUNNING, target=3000, speed=3000, distance=3000)
-    t.feed(flags=STOPPED)
+    stop_for_good(c, t)
     assert saved()[0].plan == "Hills"
 
 
@@ -243,5 +259,67 @@ async def test_history_loads_when_the_app_starts_and_a_failed_save_is_reported(m
     monkeypatch.setattr(History, "save", refuse)
     t.feed(flags=RUNNING, target=3000, speed=3000, distance=0)
     t.feed(flags=RUNNING, target=3000, speed=3000, distance=2000)
-    t.feed(flags=STOPPED)
+    stop_for_good(c, t)
     assert any(n[1] == "error" and "disk full" in n[0] for n in c.notices)
+
+
+async def test_a_stop_the_treadmill_carries_on_from_is_one_workout():
+    # The treadmill reports "stopped" after some pauses and then resumes with the same
+    # counters: that is one workout, not one saved for each stretch.
+    c, t = await connected()
+    t.feed(flags=RUNNING, target=3000, speed=3000, distance=0, duration_ms=0, incline=4, max_incline=12)
+    t.feed(flags=RUNNING, target=3000, speed=3000, distance=1000, duration_ms=400_000, incline=4, max_incline=12)
+    t.feed(flags=STOPPED, distance=1000, duration_ms=400_000)
+    c.now += 90
+    t.feed(flags=STOPPED, distance=1000, duration_ms=400_000)
+    t.feed(flags=RUNNING, target=3000, speed=3000, distance=1000, duration_ms=400_000, incline=4, max_incline=12)
+    t.feed(flags=RUNNING, target=3000, speed=3000, distance=2000, duration_ms=800_000, incline=4, max_incline=12)
+    assert saved() == []
+    stop_for_good(c, t, distance=2000, duration_ms=800_000)
+
+    (w,) = saved()
+    assert w.metres == 2000 and w.seconds == 800  # Not 1000 + 2000
+    assert w.floors == pytest.approx(2000 / MILE * 4 * 5.28, abs=0.05)
+
+
+async def test_a_new_session_after_a_long_stop_is_a_new_workout():
+    c, t = await connected()
+    t.feed(flags=RUNNING, target=3000, speed=3000, distance=0, duration_ms=0)
+    t.feed(flags=RUNNING, target=3000, speed=3000, distance=2000, duration_ms=800_000)
+    t.feed(flags=STOPPED, distance=2000, duration_ms=800_000)  # Stopped, and the app sees nothing more for a while
+    c.now += 3600
+    t.feed(flags=RUNNING, target=3000, speed=3000, distance=0, duration_ms=0)
+    t.feed(flags=RUNNING, target=3000, speed=3000, distance=500, duration_ms=200_000)
+    assert [w.metres for w in saved()] == [2000] and c.wk_metres == 500
+
+
+async def test_a_plan_started_while_the_last_workout_is_still_waiting_names_only_the_new_one():
+    from pitpat.plans import DISTANCE, MILES, Plan, Point
+
+    c, t = await connected()
+    t.feed(flags=RUNNING, target=3000, speed=3000, distance=0, duration_ms=0)
+    t.feed(flags=RUNNING, target=3000, speed=3000, distance=2000, duration_ms=800_000)
+    t.feed(flags=STOPPED, distance=2000, duration_ms=800_000)  # The first run, still waiting to be saved
+    c.start_plan(Plan("Hills", MILES, DISTANCE, 5.0, (Point(0, 2.0),)))
+    t.feed(flags=STOPPED, distance=2000, duration_ms=800_000)  # Frames before the belt moves
+    t.feed(flags=RUNNING, target=3000, speed=3000, distance=0, duration_ms=0)  # The treadmill starts over
+    t.feed(flags=RUNNING, target=3000, speed=3000, distance=400, duration_ms=100_000)
+    (first,) = saved()
+    assert first.plan is None and first.metres == 2000
+    assert c.wk_plan == "Hills"
+    stop_for_good(c, t, distance=400, duration_ms=100_000)
+    assert [w.plan for w in saved()] == [None, "Hills"]
+
+
+def test_workouts_are_listed_newest_first_with_plan_and_time():
+    from pitpat.history import fmt_duration, fmt_when, summary_text, workouts_newest_first
+
+    a = Workout("2026-11-16", "2026-11-16T18:05:00", 1609.344, 3.0, 1500, None)
+    b = Workout("2026-11-17", "2026-11-17T07:30:00", 3218.688, 20.0, 3569, "2 Up and Down")
+    assert workouts_newest_first([a, b], date(2026, 11, 16), date(2026, 11, 17)) == [b, a]
+    assert a.plan_name == "No plan" and b.plan_name == "2 Up and Down"
+    assert fmt_duration(3569) == "59:29" and fmt_duration(3 * 3600 + 5) == "3:00:05" and fmt_duration(41) == "0:41"
+    assert fmt_when(b.began) == "Tue, Nov 17 · 7:30 AM" and fmt_when(a.began) == "Mon, Nov 16 · 6:05 PM"
+    text = summary_text([a, b], date(2026, 11, 16), date(2026, 11, 22), True)
+    assert "Workouts\nTue, Nov 17 · 7:30 AM · 2 Up and Down · 59:29 · 2.00 mi · 20 floors" in text
+    assert "Mon, Nov 16 · 6:05 PM · No plan · 25:00 · 1.00 mi · 3 floors" in text

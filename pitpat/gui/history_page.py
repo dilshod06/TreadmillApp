@@ -175,8 +175,11 @@ class HistoryPage(QWidget):
 
         self.weeks_card, self.weeks_table = self._table_card("WEEK BY WEEK", ["Week", "Distance", "Floors", "Workouts"])
         self.days_card, self.days_table = self._table_card("DAILY RECORDS", ["Day", "Workouts", "Distance", "Floors", "Time"])
+        self.list_card, self.list_table = self._table_card("WORKOUTS", ["When", "Plan", "Time", "Distance", "Floors"])
+        self.list_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         body.addWidget(self.weeks_card)
         body.addWidget(self.days_card)
+        body.addWidget(self.list_card)
 
         share = card()
         share_layout = QVBoxLayout(share)
@@ -350,6 +353,18 @@ class HistoryPage(QWidget):
             )):
                 self.days_table.setItem(r, c, _cell(text, right=right, color=color, fill=fill))
         self._fit(self.days_table, len(records), cap=8)
+
+        listed = h.workouts_newest_first(view.workouts, first, last)
+        self.list_table.setRowCount(len(listed))
+        for r, w in enumerate(listed):
+            plain = w.plan is None
+            for c, (text, right, color) in enumerate((
+                (h.fmt_when(w.began), False, None), (w.plan_name, False, "muted" if plain else None),
+                (h.fmt_duration(w.seconds), True, None),
+                (f"{h.distance(w.metres, imperial):.2f} {unit}", True, None), (f"{w.floors:.1f}", True, "pause"),
+            )):
+                self.list_table.setItem(r, c, _cell(text, right=right, color=color))
+        self._fit(self.list_table, len(listed), cap=10)
 
         if self.show_summary:
             self.summary_text.setText(h.summary_text(view.workouts, first, last, imperial))

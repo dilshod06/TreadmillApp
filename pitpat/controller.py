@@ -36,6 +36,7 @@ MIN_REST_AFTER, MAX_REST_AFTER = 10.0, 600.0
 MIN_REST, MAX_REST = 1.0, 120.0
 # Status arrives about twice a second; a longer gap (a dropped connection) isn't counted as either.
 MAX_TICK = 5.0
+WORKOUT_END_AFTER = 180.0  # Seconds stopped before a workout counts as over
 
 STATE_LABELS = {
     State.STARTING: "STARTING",
@@ -480,6 +481,7 @@ class Controller:
         self.wk_metres = self.wk_seconds = self.wk_floors = 0.0
         self.wk_started: Optional[datetime] = None
         self.wk_plan: Optional[str] = None
+        self.wk_stopped_at: Optional[float] = None  # When the treadmill first said "stopped"
 
     def _track_workout(self, s: Status) -> None:
         if s.imperial != self.config.imperial:
@@ -491,8 +493,19 @@ class Controller:
             self._finish_workout()  # The treadmill began a new session without our seeing it stop
             last = None
         if s.state == State.STOPPED:
-            self._finish_workout()
+            # The treadmill also reports "stopped" after a pause and then carries on with the
+            # same counters, so a stop only ends the workout once it has lasted a while, or the
+            # counters start over (above).
+            if last is None:
+                return
+            if self.wk_stopped_at is None:
+                self.wk_stopped_at = self.clock()
+            elif self.clock() - self.wk_stopped_at >= WORKOUT_END_AFTER:
+                self._finish_workout()
             return
+        self.wk_stopped_at = None
+        if self.run and not self.wk_plan:  # Named here, once the belt moves, not when the plan was chosen:
+            self.wk_plan = self.run.plan.name  # the workout before it may still be waiting to be saved
         if last is None:  # Joining a session already under way counts what it has done so far
             self.wk_metres, self.wk_seconds = here
             self.wk_started = self.wall()
@@ -768,7 +781,6 @@ class Controller:
         if self._start_blocked():
             return
         self.run = PlanRun(plan, s.distance_m, s.duration_s)
-        self.wk_plan = plan.name
         self._enter_point(self.run.point, first=True)
         self._changed()
 

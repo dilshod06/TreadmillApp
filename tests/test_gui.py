@@ -659,7 +659,8 @@ def seed_history(*items: Workout) -> None:
         history.add(item)
 
 
-def test_the_floors_card_counts_live_and_resets_after_a_workout(make_gui):
+def test_the_floors_card_counts_live_and_resets_after_a_workout(make_gui, monkeypatch):
+    monkeypatch.setattr("pitpat.controller.WORKOUT_END_AFTER", 0)  # A stop ends it at once
     gui = make_gui(Config(address="AA:BB"))
     window = gui.window
     t = connect(gui)
@@ -668,6 +669,7 @@ def test_the_floors_card_counts_live_and_resets_after_a_workout(make_gui):
     wait_for(lambda: window.cards["floors"].value.text() == "21.1")  # A mile at a 4 % grade
     assert window.cards["floors"].caption.text() == "Floors climbed"
 
+    feed(gui, t, flags=IMPERIAL | STOPPED, distance=round(MILE_M))
     feed(gui, t, flags=IMPERIAL | STOPPED, distance=round(MILE_M))
     wait_for(lambda: window.cards["floors"].value.text() == "0.0")
     wait_for(lambda: len(window.view.workouts) == 1)
@@ -768,3 +770,17 @@ def test_warnings_stay_on_every_page_and_the_running_bar_shows_off_the_run_page(
         assert "km/h" in window.mini_open.text()
     window.modes.setCurrentIndex(0)
     assert window.mini.isHidden()
+
+
+def test_history_lists_each_workout_with_its_plan_and_time(make_gui):
+    today = date.today()
+    seed_history(
+        Workout(today.isoformat(), f"{today.isoformat()}T07:30:00", 3218.688, 20.0, 3569, "2 Up and Down"),
+        Workout(today.isoformat(), f"{today.isoformat()}T18:10:00", 1609.344, 0.0, 1500, None),
+    )
+    gui = make_gui(Config(address="AA:BB"))
+    page = gui.window.history
+    wait_for(lambda: page.list_table.rowCount() == 2)
+    cells = [[page.list_table.item(r, c).text() for c in range(5)] for r in range(2)]
+    assert cells[0][1:] == ["No plan", "25:00", "1.00 mi", "0.0"] and cells[0][0].endswith("6:10 PM")  # Newest first
+    assert cells[1][1:] == ["2 Up and Down", "59:29", "2.00 mi", "20.0"] and cells[1][0].endswith("7:30 AM")
